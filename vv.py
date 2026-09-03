@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 
-import sys
+import os
 import re
-import json
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+
+from flask import Flask, jsonify, request
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
-
-console = Console()
 
 BASE_URL = "https://vahan.parivahan.gov.in"
 HOMEPAGE_URL = f"{BASE_URL}/vahanservice/vahan/ui/statevalidation/homepage.xhtml"
@@ -383,8 +378,54 @@ def ymir_get_vehicle_details(vehicle_no):
     except Exception as e:
         raise RuntimeError(f"Vehicle details API error: {str(e)}")
 
+app = Flask(__name__)
+
+
+def _error(message, status):
+    return jsonify({"error": message}), status
+
+
+@app.get("/")
+def vehicle_lookup():
+    raw_vehicle_no = request.args.get("rc", "")
+    vehicle_no = re.sub(r"\\s+", "", raw_vehicle_no).upper()
+
+    if not vehicle_no:
+        return _error("Missing required query parameter: rc", 400)
+    if not re.fullmatch(r"[A-Z0-9-]{4,15}", vehicle_no):
+        return _error("Invalid vehicle registration number", 400)
+
+    try:
+        vehicle_data = ymir_get_vehicle_details(vehicle_no)
+    except Exception as exc:
+        return _error(f"Vehicle details lookup failed: {exc}", 502)
+
+    if not isinstance(vehicle_data, dict) or vehicle_data.get("statusCode") != 200:
+        return _error("Vehicle not found or upstream lookup failed", 404)
+
+    response_data = vehicle_data.get("response")
+    if not isinstance(response_data, dict):
+        return _error("Vehicle response is missing or invalid", 502)
+
+    chassis = response_data.get("chassis")
+    if not chassis:
+        return _error("Chassis number not found in vehicle data", 404)
+
+    try:
+        mobile = hange_fetch_mobile(vehicle_no, str(chassis))
+    except Exception as exc:
+        return _error(f"Registered mobile lookup failed: {exc}", 502)
+
+    result = dict(vehicle_data)
+    result["vehicleNumber"] = vehicle_no
+    result["mobile"] = mobile
+    return jsonify(result)
+
+
+''' Legacy CLI implementation retained below for reference only.
+
 def historia_main():
-    console.print(Panel.fit("[bold cyan]🚗 Vehicle Information System[/bold cyan]", border_style="cyan"))
+    console.print(Panel.fit("[bold cyan]Vehicle Information System[/bold cyan]", border_style="cyan"))
     
     while True:
         vehicle_no = console.input("\n[bold yellow]Enter Vehicle Number: [/bold yellow]").strip().upper()
@@ -495,5 +536,11 @@ def historia_main():
 
     console.print("\n[bold green]Goodbye![/bold green]")
 
+'''
+
 if __name__ == "__main__":
-    historia_main()
+    app.run(
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "5000")),
+        debug=False,
+    )
