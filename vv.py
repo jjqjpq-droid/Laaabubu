@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import random
 import re
 import time
 import urllib.parse
@@ -15,7 +16,93 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://vahan.parivahan.gov.in"
 HOMEPAGE_URL = f"{BASE_URL}/vahanservice/vahan/ui/statevalidation/homepage.xhtml"
 
-def create_session_with_retries():
+# Optional single trusted proxy, provided via env var. Takes priority over
+# the fallback public pool below. Format: "http://user:pass@host:port" or
+# "socks5://host:port".
+PARIVAHAN_PROXY_URL = os.environ.get("PARIVAHAN_PROXY_URL", "").strip()
+
+# Fallback pool of public SOCKS4 proxies. These are unauthenticated,
+# third-party proxies with no uptime guarantee — most entries are dead at
+# any given time, and none of them should be trusted with sensitive traffic
+# in production. They exist only as a best-effort way to route around
+# Parivahan blocking outbound cloud/datacenter IPs. Prefer setting
+# PARIVAHAN_PROXY_URL to a trusted paid proxy instead of relying on this list.
+_PUBLIC_PROXY_POOL = [
+    "72.195.34.59:4145", "221.226.188.218:10800", "72.195.34.41:4145",
+    "72.195.101.99:4145", "72.195.34.42:4145", "198.8.94.170:4145",
+    "72.195.34.58:4145", "192.252.220.92:17328", "202.69.38.42:5678",
+    "72.195.114.184:4145", "143.255.140.28:5678", "72.195.114.169:4145",
+    "192.252.208.67:14287", "196.29.231.1:4145", "72.37.216.68:4145",
+    "200.41.182.243:4145", "110.238.111.229:8999", "192.252.208.70:14282",
+    "192.111.130.2:4145", "104.37.135.145:4145", "192.252.211.197:14921",
+    "72.37.217.3:4145", "98.170.57.231:4145", "186.190.228.83:4153",
+    "199.58.184.97:4145", "199.187.210.54:4145", "98.188.47.150:4145",
+    "199.116.114.11:4145", "69.61.200.104:36181", "177.85.65.177:4153",
+    "192.252.216.81:4145", "129.205.244.158:1080", "74.119.147.209:4145",
+    "162.255.108.249:5678", "213.7.196.26:4153", "98.170.57.249:4145",
+    "98.188.47.132:4145", "184.181.217.210:4145", "184.181.217.220:4145",
+    "184.181.217.194:4145", "91.150.189.122:60647", "142.54.232.6:4145",
+    "103.144.209.104:3629", "110.238.109.146:8060", "192.111.137.34:18765",
+    "200.105.192.6:5678", "192.111.137.37:18762", "184.181.217.213:4145",
+    "201.174.239.28:4153", "121.200.60.122:4153", "184.181.217.206:4145",
+    "122.248.46.26:4145", "74.119.144.60:4145", "203.160.58.194:4145",
+    "110.238.109.146:8080", "125.227.169.85:38157", "81.16.9.222:3629",
+    "181.15.154.154:52033", "104.200.135.46:4145", "174.77.111.196:4145",
+    "142.54.239.1:4145", "184.181.217.201:4145", "193.158.12.138:4153",
+    "208.102.51.6:58208", "174.77.111.197:4145", "67.201.33.10:25283",
+    "64.124.145.1:1080", "38.83.108.89:5678", "142.54.229.249:4145",
+    "199.102.104.70:4145", "107.152.98.5:4145", "200.125.40.38:5678",
+    "108.175.24.1:13135", "68.71.254.6:4145", "192.252.214.20:15864",
+    "184.178.172.14:4145", "192.111.135.18:18301", "192.111.135.17:18302",
+    "70.166.167.38:57728", "199.102.106.94:4145", "184.178.172.13:15311",
+    "184.178.172.26:4145", "142.54.226.214:4145", "200.123.109.166:4153",
+    "101.109.245.200:4153", "174.77.111.198:49547", "142.54.237.34:4145",
+    "192.111.130.5:17002", "184.178.172.17:4145", "98.178.72.21:10919",
+    "174.75.211.222:4145", "72.214.108.67:4145", "184.178.172.28:15294",
+    "184.178.172.25:15291", "14.161.17.4:4153", "184.170.245.148:4145",
+    "82.132.19.108:4153", "142.54.235.9:4145", "184.178.172.3:4145",
+    "103.17.90.6:5678", "195.78.100.162:3629", "184.178.172.23:4145",
+    "192.252.215.5:16137", "104.200.152.30:4145", "184.178.172.11:4145",
+    "192.111.137.35:4145", "122.146.95.183:4145", "184.178.172.5:15303",
+    "199.58.185.9:4145", "103.121.214.50:4145", "24.249.199.4:4145",
+    "192.111.134.10:4145", "142.54.231.38:4145", "107.181.168.145:4145",
+    "98.181.137.83:4145", "192.111.138.29:4145", "24.249.199.12:4145",
+    "184.170.248.5:4145", "72.195.34.60:27391", "174.64.199.82:4145",
+    "66.42.224.229:41679", "142.54.236.97:4145", "192.111.139.163:19404",
+    "192.111.129.145:16894", "198.8.84.3:4145", "185.215.53.129:3629",
+    "199.102.105.242:4145", "174.64.199.79:4145", "98.181.137.80:4145",
+    "68.71.249.153:48606", "188.143.169.22:33333", "192.111.139.162:4145",
+    "187.19.127.246:8011", "142.54.228.193:4145", "110.238.111.229:6789",
+    "199.102.107.145:4145", "123.57.1.78:3128", "199.229.254.129:4145",
+    "103.225.125.161:4153", "170.81.141.49:61437", "103.140.35.11:4145",
+    "198.8.94.174:39078", "68.71.247.130:4145", "205.177.85.130:39593",
+    "206.220.175.2:4145", "68.1.210.189:4145", "187.44.211.118:4153",
+    "192.111.139.165:4145", "162.253.68.97:4145", "107.181.161.81:4145",
+    "91.150.77.58:56921", "183.88.240.139:4153", "98.175.31.195:4145",
+    "192.252.220.89:4145", "82.130.202.219:43429", "184.170.249.65:4145",
+    "68.1.210.163:4145", "184.178.172.18:15280", "109.224.22.36:51372",
+]
+
+# How many proxies from the pool to try (in random order) before giving up
+# and falling back to a direct connection. Kept small so a mostly-dead list
+# doesn't add minutes of latency to every request.
+_PROXY_ATTEMPT_LIMIT = 8
+_PROXY_CONNECT_TIMEOUT = 6
+
+
+def _candidate_proxy_urls():
+    """Yield proxy URLs to try, in priority order."""
+    if PARIVAHAN_PROXY_URL:
+        yield PARIVAHAN_PROXY_URL
+    pool = list(_PUBLIC_PROXY_POOL)
+    random.shuffle(pool)
+    for host_port in pool[:_PROXY_ATTEMPT_LIMIT]:
+        # These are SOCKS4 proxies; requests needs PySocks (requests[socks])
+        # installed to use the socks4:// scheme.
+        yield f"socks4://{host_port}"
+
+
+def create_session_with_retries(proxy_url=None):
     session = requests.Session()
     retry = Retry(
         total=3,
@@ -27,7 +114,30 @@ def create_session_with_retries():
     adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
+    if proxy_url:
+        session.proxies.update({"http": proxy_url, "https": proxy_url})
     return session
+
+
+def create_parivahan_session():
+    """
+    Build a session for talking to the Parivahan portal, trying a proxy pool
+    first (since Parivahan resets connections from most cloud/datacenter
+    IPs) and falling back to a direct connection if none of the proxies work.
+    Returns (session, proxy_used_or_None).
+    """
+    for proxy_url in _candidate_proxy_urls():
+        candidate = create_session_with_retries(proxy_url)
+        try:
+            probe = candidate.get(
+                HOMEPAGE_URL, timeout=_PROXY_CONNECT_TIMEOUT
+            )
+            if probe.status_code == 200:
+                return candidate, proxy_url
+        except Exception:
+            continue
+    # No working proxy found (or none configured) — fall back to direct.
+    return create_session_with_retries(), None
 
 COMMON_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
@@ -123,7 +233,7 @@ def hange_fetch_mobile(vehicle_no, chassis_no):
     if len(clean_chassis_no) > 5:
         clean_chassis_no = clean_chassis_no[-5:]
 
-    session = create_session_with_retries()
+    session, proxy_used = create_parivahan_session()
     session.headers.update(COMMON_HEADERS)
 
     try:
@@ -131,7 +241,8 @@ def hange_fetch_mobile(vehicle_no, chassis_no):
         if r1.status_code != 200:
             raise RuntimeError(f"Failed to access Parivahan portal: status {r1.status_code}")
     except Exception as e:
-        raise RuntimeError(f"Connection error: {str(e)}")
+        detail = f" (via proxy {proxy_used})" if proxy_used else " (direct, no proxy)"
+        raise RuntimeError(f"Connection error{detail}: {str(e)}")
 
     vs = levi_extract_viewstate(r1.text)
     soup1 = BeautifulSoup(r1.text, "html.parser")
