@@ -23,11 +23,14 @@ HOMEPAGE_URL = f"{BASE_URL}/vahanservice/vahan/ui/statevalidation/homepage.xhtml
 def create_session_with_retries():
     session = requests.Session()
     retry = Retry(
-        total=3,
-        read=3,
-        connect=3,
-        backoff_factor=0.5,
-        status_forcelist=[500, 502, 503, 504],
+        total=5,
+        read=5,
+        connect=5,
+        backoff_factor=1.0,
+        status_forcelist=[408, 429, 500, 502, 503, 504],
+        allowed_methods=frozenset({"GET", "POST"}),
+        respect_retry_after_header=True,
+        raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     session.mount('http://', adapter)
