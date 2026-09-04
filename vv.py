@@ -388,7 +388,7 @@ def _error(message, status):
 @app.get("/")
 def vehicle_lookup():
     raw_vehicle_no = request.args.get("rc", "")
-    vehicle_no = re.sub(r"\\s+", "", raw_vehicle_no).upper()
+    vehicle_no = re.sub(r"\s+", "", raw_vehicle_no).upper()
 
     if not vehicle_no:
         return _error("Missing required query parameter: rc", 400)
@@ -411,14 +411,19 @@ def vehicle_lookup():
     if not chassis:
         return _error("Chassis number not found in vehicle data", 404)
 
-    try:
-        mobile = hange_fetch_mobile(vehicle_no, str(chassis))
-    except Exception as exc:
-        return _error(f"Registered mobile lookup failed: {exc}", 502)
-
     result = dict(vehicle_data)
     result["vehicleNumber"] = vehicle_no
-    result["mobile"] = mobile
+
+    try:
+        result["mobile"] = hange_fetch_mobile(vehicle_no, str(chassis))
+        result["mobileLookupStatus"] = "success"
+    except Exception as exc:
+        # Parivahan may reset requests from serverless/cloud IPs. Still return
+        # the complete vehicle response instead of discarding usable data.
+        result["mobile"] = None
+        result["mobileLookupStatus"] = "unavailable"
+        result["mobileLookupError"] = str(exc)
+
     return jsonify(result)
 
 
