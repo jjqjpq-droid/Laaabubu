@@ -334,18 +334,71 @@ def hange_fetch_mobile(vehicle_no, chassis_no):
     except Exception as e:
         raise RuntimeError(f"Chassis validation failed: {str(e)}")
 
-    mobile_match = re.search(r'id=["\']balanceFeesFine:tf_mobile["\'][^>]*value=["\']([^"\']*)["\']', r8.text)
-    if not mobile_match:
-        mobile_match = re.search(r'name=["\']balanceFeesFine:tf_mobile["\'][^>]*value=["\']([^"\']*)["\']', r8.text)
+    # Build the FULL raw payload returned by the Parivahan validation step,
+    # not just the mobile number. Every input/textarea rendered inside the
+    # AJAX update fragments (auth panel, balanceFeesFine form fields, any
+    # embedded messages) is captured as-is so callers get the complete
+    # second-source response rather than a single extracted field.
+    full_source_data = {}
+    try:
+        root8 = ET.fromstring(r8.text)
+        for upd in root8.findall(".//update"):
+            update_id = upd.get("id", "")
+            update_html = upd.text or ""
+            frag_soup = BeautifulSoup(update_html, "html.parser")
+            frag_fields = {}
+            for inp in frag_soup.find_all(["input", "textarea", "select"]):
+                iname = inp.get("name") or inp.get("id")
+                if not iname:
+                    continue
+                if inp.name == "select":
+                    selected = inp.find("option", selected=True)
+                    ival = selected.get("value", "") if selected else ""
+                elif inp.name == "textarea":
+                    ival = inp.text or ""
+                else:
+                    ival = inp.get("value", "")
+                frag_fields[iname] = ival
+            for msg in frag_soup.select(".ui-messages-error-detail, .ui-message-error-detail"):
+                frag_fields.setdefault("_messages", []).append(msg.get_text(strip=True))
+            if frag_fields:
+                full_source_data[update_id or f"fragment_{len(full_source_data)}"] = frag_fields
+    except Exception:
+        pass
 
-    if mobile_match and mobile_match.group(1).strip():
-        return mobile_match.group(1).strip()
+    if not full_source_data:
+        all_fields = {}
+        for inp in BeautifulSoup(r8.text, "html.parser").find_all(["input", "textarea", "select"]):
+            iname = inp.get("name") or inp.get("id")
+            if not iname:
+                continue
+            if inp.name == "select":
+                selected = inp.find("option", selected=True)
+                ival = selected.get("value", "") if selected else ""
+            elif inp.name == "textarea":
+                ival = inp.text or ""
+            else:
+                ival = inp.get("value", "")
+            all_fields[iname] = ival
+        full_source_data["raw"] = all_fields
 
-    err_match = re.search(r'class=["\'][^"\']*ui-messages-error-detail[^"\']*["\'][^>]*>([^<]+)<', r8.text)
-    if err_match:
-        raise RuntimeError(f"Parivahan Error: {err_match.group(1).strip()}")
+    mobile_value = None
+    for frag in full_source_data.values():
+        if isinstance(frag, dict):
+            for key, val in frag.items():
+                if key.endswith("tf_mobile") and str(val).strip():
+                    mobile_value = str(val).strip()
+                    break
+        if mobile_value:
+            break
 
-    raise RuntimeError("Mobile number could not be found.")
+    if not mobile_value:
+        err_match = re.search(r'class=["\'][^"\']*ui-messages-error-detail[^"\']*["\'][^>]*>([^<]+)<', r8.text)
+        if err_match:
+            raise RuntimeError(f"Parivahan Error: {err_match.group(1).strip()}")
+        raise RuntimeError("Mobile number could not be found.")
+
+    return {"mobile": mobile_value, "raw": full_source_data}
 
 def ymir_get_vehicle_details(vehicle_no):
     vehicle_no = vehicle_no.upper().replace(" ", "")
@@ -415,12 +468,15 @@ def vehicle_lookup():
     result["vehicleNumber"] = vehicle_no
 
     try:
-        result["mobile"] = hange_fetch_mobile(vehicle_no, str(chassis))
+        mobile_result = hange_fetch_mobile(vehicle_no, str(chassis))
+        result["mobile"] = mobile_result["mobile"]
+        result["mobileSourceRawResponse"] = mobile_result["raw"]
         result["mobileLookupStatus"] = "success"
     except Exception as exc:
         # Parivahan may reset requests from serverless/cloud IPs. Still return
         # the complete vehicle response instead of discarding usable data.
         result["mobile"] = None
+        result["mobileSourceRawResponse"] = None
         result["mobileLookupStatus"] = "unavailable"
         result["mobileLookupError"] = str(exc)
 
